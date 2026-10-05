@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>S2S 后处理流程看板</title>
+<style>
+  /* ===== 主题变量（dataviz 参考调色板：surface/ink/status 固定色） ===== */
+  .viz-root {
+    color-scheme: light;
+    --page:        #f9f9f7;
+    --surface-1:   #fcfcfb;
+    --ink-1:       #0b0b0b;
+    --ink-2:       #52514e;
+    --ink-3:       #898781;
+    --grid:        #e1e0d9;
+    --axis:        #c3c2b7;
+    --border:      rgba(11,11,11,0.10);
+    --edge:        #898781;
+    --blue:        #2a78d6;
+    /* 状态色：固定，永不禁用主题切换 */
+    --good:        #0ca30c;
+    --warning:     #fab219;
+    --serious:     #ec835a;
+    --critical:    #d03b3b;
+    --node-h:      76px;
+    --node-w:      160px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --page:        #0d0d0d;
+      --surface-1:   #1a1a19;
+      --ink-1:       #ffffff;
+      --ink-2:       #c3c2b7;
+      --ink-3:       #898781;
+      --grid:        #2c2c2a;
+      --axis:        #383835;
+      --border:      rgba(255,255,255,0.10);
+      --edge:        #898781;
+      --blue:        #3987e5;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --page:        #0d0d0d;
+    --surface-1:   #1a1a19;
+    --ink-1:       #ffffff;
+    --ink-2:       #c3c2b7;
+    --ink-3:       #898781;
+    --grid:        #2c2c2a;
+    --axis:        #383835;
+    --border:      rgba(255,255,255,0.10);
+    --edge:        #898781;
+    --blue:        #3987e5;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page);
+    color: var(--ink-1);
+    -webkit-font-smoothing: antialiased;
+  }
+  .viz-root { min-height: 100vh; padding: 24px 28px 40px; }
+
+  /* ===== 页头 ===== */
+  header {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    flex-wrap: wrap; gap: 16px; margin-bottom: 18px;
+  }
+  h1 { font-size: 22px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  .meta { color: var(--ink-2); font-size: 13px; margin-top: 6px; }
+  .meta b { color: var(--ink-1); font-weight: 600; }
+  .meta .mono { font-variant-numeric: tabular-nums; }
+
+  /* ===== 磁盘 tile ===== */
+  .disk-tile {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 14px;
+  }
+  .disk-tile .val { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .disk-tile .lbl { color: var(--ink-2); font-size: 12px; }
+
+  /* ===== 图例 ===== */
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center;
+    margin-bottom: 20px; padding: 10px 14px;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+    font-size: 13px; color: var(--ink-2);
+  }
+  .legend .item { display: inline-flex; align-items: center; gap: 7px; }
+  .legend .swatch { width: 11px; height: 11px; border-radius: 50%; flex: 0 0 auto; }
+
+  .theme-toggle {
+    margin-left: auto; font: inherit; font-size: 12px; color: var(--ink-2);
+    background: transparent; border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 10px; cursor: pointer;
+  }
+  .theme-toggle:hover { color: var(--ink-1); }
+
+  /* ===== DAG 容器 ===== */
+  .dag-wrap { overflow-x: auto; }
+  .dag { position: relative; width: 980px; height: 1280px; }
+  .dag svg.edges { position: absolute; inset: 0; pointer-events: none; }
+
+  .node {
+    position: absolute; width: var(--node-w); height: var(--node-h);
+    display: flex; align-items: center; gap: 9px; padding: 0 12px;
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; cursor: default;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    transition: transform .12s ease, box-shadow .12s ease;
+  }
+  .node:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.10); }
+  .node .dot {
+    width: 12px; height: 12px; border-radius: 50%; flex: 0 0 auto;
+    border: 2px solid var(--surface-1);
+    box-shadow: 0 0 0 1.5px var(--border);
+  }
+  .node .body { min-width: 0; }
+  .node .name {
+    font-size: 12px; font-weight: 600; color: var(--ink-1);
+    white-space: normal; word-break: break-word; line-height: 1.25;
+  }
+  .node .sub {
+    font-size: 11px; color: var(--ink-2); white-space: normal;
+    word-break: break-word; line-height: 1.3; margin-top: 2px;
+  }
+  .node .sub .stateword { font-weight: 600; }
+
+  /* 状态点颜色 */
+  .node[data-state="done"]    .dot { background: var(--good); }
+  .node[data-state="running"] .dot { background: var(--warning); animation: pulse 1.4s ease-in-out infinite; }
+  .node[data-state="queued"]  .dot { background: var(--serious); }
+  .node[data-state="failed"]  .dot { background: var(--critical); }
+  .node[data-state="ready"]   .dot { background: var(--blue); }
+  .node[data-state="pending"] .dot { background: var(--ink-3); }
+
+  .node[data-state="failed"] { border-color: color-mix(in srgb, var(--critical) 45%, var(--border)); }
+  .node[data-state="queued"] { border-color: color-mix(in srgb, var(--serious) 45%, var(--border)); }
+  .node[data-state="running"] { border-color: color-mix(in srgb, var(--warning) 55%, var(--border)); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .45; }
+  }
+
+  footer { margin-top: 22px; color: var(--ink-3); font-size: 12px; }
+  footer code { font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <header>
+    <div>
+      <h1>S2S 后处理流程看板</h1>
+      <div class="meta">
+        初始化日 <b class="mono" id="mInit">—</b>
+        · 快照生成 <span class="mono" id="mGen">—</span>
+        · 只读巡检，每 20 分钟自动刷新
+      </div>
+    </div>
+    <div class="disk-tile">
+      <span class="dot" id="diskDot" style="width:12px;height:12px;border-radius:50%;"></span>
+      <div>
+        <div class="lbl">业务目录磁盘使用率</div>
+        <div class="val" id="diskVal">—</div>
+      </div>
+    </div>
+  </header>
+
+  <div class="legend">
+    <span class="item"><span class="swatch" style="background:var(--good)"></span>完成</span>
+    <span class="item"><span class="swatch" style="background:var(--warning)"></span>运行中</span>
+    <span class="item"><span class="swatch" style="background:var(--serious)"></span>排队中（已提交）</span>
+    <span class="item"><span class="swatch" style="background:var(--critical)"></span>失败 / 超时</span>
+    <span class="item"><span class="swatch" style="background:var(--blue)"></span>就绪（上游已齐）</span>
+    <span class="item"><span class="swatch" style="background:var(--ink-3)"></span>等待（上游未齐）</span>
+    <button class="theme-toggle" id="themeToggle">切换深色 / 浅色</button>
+  </div>
+
+  <div class="dag-wrap">
+    <div class="dag" id="dag">
+      <svg class="edges" id="edges" width="980" height="1280"></svg>
+    </div>
+  </div>
+
+  <footer>
+    快照数据 <code>status.json</code> · 看板 <code>status.html</code> · 由 <code>status.sh</code> 生成（data 内嵌，本地双击即可打开）
+  </footer>
+</div>
+
+<script id="statusData" type="application/json">{
+  "init": "2026-10-08",
+  "generated_at": "2026-10-11 08:40:33",
+  "disk": {
+    "pct": 76,
+    "state": "good"
+  },
+  "steps": {
+    "rf_model": {
+      "family": "回算",
+      "name": "回算模式输出",
+      "state": "done",
+      "done": "2026-10-08 14:50:18",
+      "start": "",
+      "deadline": "2026-10-08 16:50:00",
+      "note": "",
+      "marker": "…/2026-10-08/.run_done"
+    },
+    "rf_regrid": {
+      "family": "回算",
+      "name": "Atmos_step1_regrid",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-08 22:00:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/hindcast/2026-10-08/.rf_regrid_done"
+    },
+    "clim": {
+      "family": "气候态",
+      "name": "Atmos_step2_clim",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-09 02:00:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/climatology/2026-10-08/.postp_done"
+    },
+    "rf_sice": {
+      "family": "回算",
+      "name": "海冰",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-08 22:30:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/hindcast/2026-10-08/.rf_sice_done"
+    },
+    "rf_pop": {
+      "family": "回算",
+      "name": "海温",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-08 23:00:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/hindcast/2026-10-08/.rf_pop_done"
+    },
+    "rf_clm": {
+      "family": "回算",
+      "name": "陆面",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-08 23:30:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/hindcast/2026-10-08/.rf_clm_done"
+    },
+    "rt_model": {
+      "family": "实时",
+      "name": "实时模式输出",
+      "state": "done",
+      "done": "2026-10-09 02:13:21",
+      "start": "",
+      "deadline": "2026-10-09 02:00:00",
+      "note": "",
+      "marker": "…/.run_done"
+    },
+    "rt_regrid": {
+      "family": "实时",
+      "name": "step1 regrid",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-09 06:00:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/level1/2026-10-08/.regrid_done"
+    },
+    "rt_clm": {
+      "family": "实时",
+      "name": "step22 CLM",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-09 08:00:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/level2/2026-10-08/.pick_vars_clm_done"
+    },
+    "rt_pick": {
+      "family": "实时",
+      "name": "step2 pick_vars",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-09 08:00:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/level2/2026-10-08/.pick_vars_done"
+    },
+    "rt_mean": {
+      "family": "实时",
+      "name": "step3 周/月平均",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-09 08:10:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/level2/2026-10-08/.level2_mean_done"
+    },
+    "rt_anom": {
+      "family": "实时",
+      "name": "step4 距平",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-09 09:00:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/level2/2026-10-08/.anom_done"
+    },
+    "rt_postp": {
+      "family": "实时",
+      "name": "step5 汇总",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-09 09:30:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/level2/2026-10-08/.postp_done"
+    },
+    "trans_l2": {
+      "family": "传输",
+      "name": "level2 拉取",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-10 01:00:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/level2/2026-10-08/.transfer2hydro_done"
+    },
+    "trans_clim": {
+      "family": "传输",
+      "name": "气候态 拉取",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-10 01:00:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/climatology/2026-10-08/.transfer2hydro_done"
+    },
+    "trans_hind": {
+      "family": "传输",
+      "name": "回算 拉取",
+      "state": "done",
+      "done": "",
+      "start": "",
+      "deadline": "2026-10-10 01:00:00",
+      "note": "已删除归档",
+      "marker": "…/s2s/hindcast/2026-10-08/.transfer2hydro_done"
+    },
+    "delete": {
+      "family": "删除",
+      "name": "清理删除",
+      "state": "done",
+      "done": "2026-10-10 03:54:39",
+      "start": "",
+      "deadline": "2026-10-10 02:00:00",
+      "note": "",
+      "marker": "…/s2s/.deleted/2026-10-08.done"
+    }
+  }
+}
+</script>
+<script>
+(function () {
+  var DATA = JSON.parse(document.getElementById('statusData').textContent);
+
+  // 节点布局（中心坐标）
+  var LAYOUT = {
+    rf_model:   {x:330, y:70},
+    rt_model:   {x:810, y:70},
+    rf_regrid:  {x:90,  y:230},
+    rf_sice:    {x:250, y:230},
+    rf_pop:     {x:410, y:230},
+    rf_clm:     {x:570, y:230},
+    clim:       {x:90,  y:390},
+    rt_regrid:  {x:730, y:230},
+    rt_clm:     {x:890, y:230},
+    rt_pick:    {x:730, y:390},
+    rt_mean:    {x:730, y:550},
+    rt_anom:    {x:730, y:710},
+    rt_postp:   {x:730, y:870},
+    trans_l2:   {x:730, y:1030},
+    trans_clim: {x:90,  y:1030},
+    trans_hind: {x:410, y:1030},
+    delete:     {x:410, y:1190}
+  };
+
+  var EDGES = [
+    ['rf_model','rf_regrid'], ['rf_model','rf_sice'], ['rf_model','rf_pop'], ['rf_model','rf_clm'],
+    ['rf_regrid','clim'],
+    ['clim','trans_clim'], ['clim','rt_anom'],
+    ['rf_regrid','trans_hind'], ['rf_sice','trans_hind'], ['rf_pop','trans_hind'], ['rf_clm','trans_hind'],
+    ['rt_model','rt_regrid'], ['rt_model','rt_clm'],
+    ['rt_regrid','rt_pick'], ['rt_pick','rt_mean'], ['rt_mean','rt_anom'],
+    ['rt_clm','rt_postp'], ['rt_anom','rt_postp'],
+    ['rt_postp','trans_l2'],
+    ['trans_l2','delete'], ['trans_clim','delete'], ['trans_hind','delete']
+  ];
+
+  var NODE_H = 76, NODE_W = 160;
+  var STATE_TEXT = { done:'完成', running:'运行中', queued:'排队中', failed:'失败', ready:'就绪', pending:'等待' };
+  var STATE_SYM  = { done:'✓', running:'↻', queued:'⏳', failed:'✕', ready:'→', pending:'…' };
+
+  function fmt(dt) {
+    if (!dt) return '';
+    var m = String(dt).match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+    return m ? (m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5]) : dt;
+  }
+
+  // 页头 + 磁盘
+  document.getElementById('mInit').textContent = DATA.init;
+  document.getElementById('mGen').textContent = DATA.generated_at;
+  var dk = DATA.disk || {};
+  document.getElementById('diskVal').textContent = (dk.pct != null ? dk.pct : '—') + '%';
+  var dkDot = document.getElementById('diskDot');
+  dkDot.style.background = (dk.state === 'critical') ? 'var(--critical)'
+                        : (dk.state === 'warning') ? 'var(--warning)' : 'var(--good)';
+
+  // 边
+  var svg = document.getElementById('edges');
+  var defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  defs.innerHTML = '<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" ' +
+    'markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#898781"/></marker>';
+  svg.appendChild(defs);
+
+  EDGES.forEach(function (e) {
+    var a = LAYOUT[e[0]], b = LAYOUT[e[1]];
+    if (!a || !b) return;
+    var x1 = a.x, y1 = a.y + NODE_H / 2;
+    var x2 = b.x, y2 = b.y - NODE_H / 2;
+    var mid = (y1 + y2) / 2;
+    var d = 'M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + mid + ', ' + x2 + ' ' + mid + ', ' + x2 + ' ' + y2;
+    var p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    p.setAttribute('d', d);
+    p.setAttribute('fill', 'none');
+    p.setAttribute('stroke', '#898781');
+    p.setAttribute('stroke-width', '1.4');
+    p.setAttribute('opacity', '0.75');
+    p.setAttribute('marker-end', 'url(#arrow)');
+    svg.appendChild(p);
+  });
+
+  // 节点
+  var dag = document.getElementById('dag');
+  Object.keys(LAYOUT).forEach(function (id) {
+    var st = DATA.steps[id];
+    if (!st) return;
+    var pos = LAYOUT[id];
+
+    var node = document.createElement('div');
+    node.className = 'node';
+    node.dataset.state = st.state;
+    node.style.left = (pos.x - NODE_W / 2) + 'px';
+    node.style.top  = (pos.y - NODE_H / 2) + 'px';
+
+    var dot = document.createElement('span'); dot.className = 'dot';
+    var body = document.createElement('div'); body.className = 'body';
+    var nm = document.createElement('div'); nm.className = 'name'; nm.textContent = st.name;
+    var sub = document.createElement('div'); sub.className = 'sub';
+
+    var sw = document.createElement('span'); sw.className = 'stateword';
+    sw.textContent = STATE_TEXT[st.state] || st.state;
+    var detail = '';
+    if (st.state === 'done')       detail = ' · ' + (fmt(st.done) || st.note || '') + ' · 死线 ' + fmt(st.deadline);
+    else if (st.state === 'running' || st.state === 'queued') detail = (st.start ? ' · 启动 ' + fmt(st.start) : '') + ' · 死线 ' + fmt(st.deadline);
+    else if (st.state === 'failed')  detail = ' · ' + (st.note || '异常') + ' · 死线 ' + fmt(st.deadline);
+    else detail = ' · 死线 ' + fmt(st.deadline);
+    sub.appendChild(sw);
+    sub.appendChild(document.createTextNode(detail));
+
+    body.appendChild(nm); body.appendChild(sub);
+    node.appendChild(dot); node.appendChild(body);
+
+    node.title = st.family + ' / ' + st.name + '\n' +
+      '状态: ' + (STATE_TEXT[st.state] || st.state) + (st.note ? ' (' + st.note + ')' : '') + '\n' +
+      '完成: ' + (st.done || '—') + '\n' +
+      '启动: ' + (st.start || '—') + '\n' +
+      '死线: ' + (st.deadline || '—') + '\n' +
+      '标记: ' + (st.marker || '—');
+
+    dag.appendChild(node);
+  });
+})();
+</script>
+</body>
+</html>
